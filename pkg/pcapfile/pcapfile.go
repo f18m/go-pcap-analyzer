@@ -6,6 +6,7 @@ package pcapfile
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -20,32 +21,72 @@ type PcapHeader struct {
 	Network       uint32 /* data link type */
 }
 
-// PcapFile is the main structure exported by this package
-type PcapFile struct {
-	actual_file *os.File
-	hdr         PcapHeader
+// PcaprecHdr describes the binary header of each packet inside a PCAP file
+type PcaprecHdr struct {
+	TsSec   uint32 /* timestamp seconds */
+	TsUsec  uint32 /* timestamp microseconds */
+	InclLen uint32 /* number of octets of packet saved in file */
+	OrigLen uint32 /* actual length of packet */
 }
 
-func (pf PcapFile) Open(fname string) bool {
+// PcapFile is the main structure exported by this package
+type PcapFile struct {
+	ActualFile *os.File
+	Hdr        PcapHeader
+}
+
+func (pf PcapFile) Open(fname string) (bool, uint) {
+	var nreadPkts uint
 	var err error
-	pf.actual_file, err = os.Open(fname)
+	pf.ActualFile, err = os.Open(fname)
 	if err != nil {
 		panic(err) // FIXME do better error handling
 		//return false
 	}
 
-	err = binary.Read(pf.actual_file, binary.LittleEndian, &pf.hdr)
+	// read the header
+	err = binary.Read(pf.ActualFile, binary.LittleEndian, &pf.Hdr)
 	if err != nil {
-		fmt.Println("binary.Read failed:", err)
-		return false
+		fmt.Println("Failed to read the PCAP header:", err)
+		return false, nreadPkts
 	}
 
-	//fmt.Printf("%X\n", pf.hdr.Magic_number)
-	//fmt.Printf("%+v\n", pf.hdr)
-	return true
+	//fmt.Printf("%X\n", pf.Hdr.Magic_number)
+	//fmt.Printf("%+v\n", pf.Hdr)
+
+	// now loop till there is a packet
+	for {
+
+		// read packet header
+		var pktHdr PcaprecHdr
+		err = binary.Read(pf.ActualFile, binary.LittleEndian, &pktHdr)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Println("Failed to read a packet:", err)
+			return false, nreadPkts
+		}
+
+		//fmt.Printf("%+v\n", pktHdr)
+
+		// read the packet payload
+		var pktPayload []byte = make([]byte, pktHdr.InclLen)
+		//err = binary.Read(pf.ActualFile, binary.LittleEndian, &pktPayload)
+		_, err := pf.ActualFile.Read(pktPayload)
+		if err != nil {
+			fmt.Println("Failed to read a packet:", err)
+			return false, nreadPkts
+		}
+
+		//fmt.Println("Read ", nread, " bytes")
+		nreadPkts++
+	}
+
+	return true, nreadPkts
 }
 
 func (pf PcapFile) Close() error {
 	fmt.Printf("Closing the PCAP file\n")
-	return pf.actual_file.Close()
+	return pf.ActualFile.Close()
 }
