@@ -4,6 +4,7 @@
 package pcapfile
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -44,8 +45,11 @@ func (pf PcapFile) Open(fname string) (bool, uint) {
 		//return false
 	}
 
+	// create the buffered Reader
+	buffReader := bufio.NewReader(pf.ActualFile)
+
 	// read the header
-	err = binary.Read(pf.ActualFile, binary.LittleEndian, &pf.Hdr)
+	err = binary.Read(buffReader, binary.LittleEndian, &pf.Hdr)
 	if err != nil {
 		fmt.Println("Failed to read the PCAP header:", err)
 		return false, nreadPkts
@@ -55,11 +59,13 @@ func (pf PcapFile) Open(fname string) (bool, uint) {
 	//fmt.Printf("%+v\n", pf.Hdr)
 
 	// now loop till there is a packet
+	var nResizeOps uint
+	var pktPayload []byte //= make([]byte, pktHdr.InclLen)
 	for {
 
 		// read packet header
 		var pktHdr PcaprecHdr
-		err = binary.Read(pf.ActualFile, binary.LittleEndian, &pktHdr)
+		err = binary.Read(buffReader, binary.LittleEndian, &pktHdr)
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -70,18 +76,45 @@ func (pf PcapFile) Open(fname string) (bool, uint) {
 
 		//fmt.Printf("%+v\n", pktHdr)
 
+		// prepare buffer
+		if int(pktHdr.InclLen) > cap(pktPayload) {
+			// garbage-collect the old buffer and create a larger, new buffer
+			pktPayload = make([]byte, pktHdr.InclLen)
+			nResizeOps++
+		} else {
+			// keep using current buffer, but resize it:
+			pktPayload = pktPayload[:pktHdr.InclLen]
+		}
+
 		// read the packet payload
-		var pktPayload []byte = make([]byte, pktHdr.InclLen)
-		//err = binary.Read(pf.ActualFile, binary.LittleEndian, &pktPayload)
-		_, err := pf.ActualFile.Read(pktPayload)
+
+		nreadBytes, err := buffReader.Read(pktPayload)
 		if err != nil {
 			fmt.Println("Failed to read a packet:", err)
 			return false, nreadPkts
 		}
+		if nreadBytes != int(pktHdr.InclLen) {
+			// try again since bufio.Read() launches at most 1 io.Read() on the underlying file object
+			// so it's possible we cannot read the whole packet in 1 single call
+			var pktPayloadMissing []byte = make([]byte, pktHdr.InclLen-uint32(nreadBytes))
+			nreadBytes2, err := buffReader.Read(pktPayloadMissing)
+			if err != nil {
+				fmt.Println("Failed to read a packet:", err)
+				return false, nreadPkts
+			}
 
-		//fmt.Println("Read ", nread, " bytes")
+			var totReadBytes = nreadBytes + nreadBytes2
+			if totReadBytes != int(pktHdr.InclLen) {
+				fmt.Println("Failed to read packet #", nreadPkts, ": read only", totReadBytes, "bytes out of expected", pktHdr.InclLen)
+				return false, nreadPkts
+			}
+		}
+
+		//fmt.Println("Read ", nreadBytes, " bytes")
 		nreadPkts++
 	}
+
+	fmt.Println("Done ", nResizeOps, " buffer resizing ops; max packet len was", cap(pktPayload), "bytes")
 
 	return true, nreadPkts
 }
