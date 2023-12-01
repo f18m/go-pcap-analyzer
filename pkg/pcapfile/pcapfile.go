@@ -36,6 +36,19 @@ type PcapFile struct {
 	Hdr        PcapHeader
 }
 
+func ensureEnoughBufferSpace(pbuff *[]byte, requiredSize int) bool {
+
+	if requiredSize > cap(*pbuff) {
+		// garbage-collect the old buffer and create a larger, new buffer of the right size
+		*pbuff = make([]byte, requiredSize)
+		return true
+	} else {
+		// keep using current buffer, but change its len toask for right number of bytes to bufio.Read()
+		*pbuff = (*pbuff)[:requiredSize]
+		return false
+	}
+}
+
 func (pf PcapFile) Open(fname string) (bool, uint) {
 	var nreadPkts uint
 	var err error
@@ -68,49 +81,48 @@ func (pf PcapFile) Open(fname string) (bool, uint) {
 		err = binary.Read(buffReader, binary.LittleEndian, &pktHdr)
 		if err != nil {
 			if err == io.EOF {
+				// it's expected to reach the EOF of PCAP file while reading for a new pkt header
 				break
 			}
-			fmt.Println("Failed to read a packet:", err)
+			fmt.Println("Failed to read a packet header:", err)
 			return false, nreadPkts
 		}
 
 		//fmt.Printf("%+v\n", pktHdr)
 
 		// prepare buffer
-		if int(pktHdr.InclLen) > cap(pktPayload) {
-			// garbage-collect the old buffer and create a larger, new buffer
-			pktPayload = make([]byte, pktHdr.InclLen)
+		if ensureEnoughBufferSpace(&pktPayload, int(pktHdr.InclLen)) {
 			nResizeOps++
-		} else {
-			// keep using current buffer, but resize it:
-			pktPayload = pktPayload[:pktHdr.InclLen]
+		}
+		if cap(pktPayload) < int(pktHdr.InclLen) {
+			panic("Some problem with buffer resizing happened")
 		}
 
 		// read the packet payload
-
 		nreadBytes, err := buffReader.Read(pktPayload)
 		if err != nil {
-			fmt.Println("Failed to read a packet:", err)
+			fmt.Println("Failed to read a packet payload:", err)
 			return false, nreadPkts
 		}
 		if nreadBytes != int(pktHdr.InclLen) {
 			// try again since bufio.Read() launches at most 1 io.Read() on the underlying file object
-			// so it's possible we cannot read the whole packet in 1 single call
-			var pktPayloadMissing []byte = make([]byte, pktHdr.InclLen-uint32(nreadBytes))
-			nreadBytes2, err := buffReader.Read(pktPayloadMissing)
+			// so it's possible we cannot read the whole packet payload in 1 single call
+			nreadBytes2, err := buffReader.Read(pktPayload[nreadBytes:])
 			if err != nil {
 				fmt.Println("Failed to read a packet:", err)
 				return false, nreadPkts
 			}
 
-			var totReadBytes = nreadBytes + nreadBytes2
-			if totReadBytes != int(pktHdr.InclLen) {
-				fmt.Println("Failed to read packet #", nreadPkts, ": read only", totReadBytes, "bytes out of expected", pktHdr.InclLen)
+			nreadBytes += nreadBytes2
+			if nreadBytes != int(pktHdr.InclLen) {
+				fmt.Println("Failed to read packet #", nreadPkts, ": read only", nreadBytes, "bytes out of expected", pktHdr.InclLen)
 				return false, nreadPkts
 			}
 		}
 
-		//fmt.Println("Read ", nreadBytes, " bytes")
+		// TODO process the packet layers:
+		// Ethernet, IPv4/IPv6, TCP/UDP/others
+
 		nreadPkts++
 	}
 
